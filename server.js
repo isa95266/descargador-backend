@@ -5,11 +5,12 @@ const path = require("path");
 const fs = require("fs");
 
 const app = express();
-// Puerto dinámico para la nube (Render) o 3000 para local
+// Render asigna un puerto automáticamente en process.env.PORT
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
+// Configurar carpeta de descargas temporales
 const DOWNLOADS_DIR = path.join(__dirname, "downloads");
 if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR);
 
@@ -36,59 +37,74 @@ function sendProgress(value) {
 // ================= DESCARGA =================
 app.get("/download/:format", (req, res) => {
   const { format } = req.params;
-  const { url, quality } = req.query;
+  const { url } = req.query;
 
-  if (!url) return res.status(400).json({ error: "URL requerida" });
+  if (!url) {
+    return res.status(400).json({ error: "URL requerida" });
+  }
 
   const fileName = `media_${Date.now()}.${format}`;
   const outputPath = path.join(DOWNLOADS_DIR, fileName);
 
-  // ARGUMENTOS: Usamos 'yt-dlp' directamente (el sistema debe tenerlo en el PATH)
-  let args = [];
+  // Argumentos optimizados para evitar bloqueos y mejorar compatibilidad
+  let args = [
+    "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "--no-check-certificates",
+    "--no-warnings",
+    "--newline" // Importante para que el progreso se lea línea a línea
+  ];
+
   if (format === "mp3") {
-    // --force-overwrites evita errores si el archivo ya existe
-    args = ["-x", "--audio-format", "mp3", "--force-overwrites", "-o", outputPath, url];
+    args.push("-x", "--audio-format", "mp3", "-o", outputPath, url);
   } else {
-    // Selección de calidad simplificada para evitar errores de merging
-    args = ["-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4] / bv*+ba/b", "-o", outputPath, url];
+    // Busca la mejor calidad de video mp4 y audio m4a y los une
+    args.push("-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]", "-o", outputPath, url);
   }
 
-  // IMPORTANTE: 'yt-dlp' debe estar instalado en el entorno (Docker)
+  // Ejecutamos yt-dlp (en Docker/Linux no lleva .exe)
   const ytdlp = spawn("yt-dlp", args);
 
   ytdlp.stdout.on("data", data => {
-    const match = data.toString().match(/(\d+(?:\.\d+)?)%/);
-    if (match) sendProgress(match[1]);
+    const output = data.toString();
+    // Buscamos el porcentaje en el texto de salida
+    const match = output.match(/(\d+(?:\.\d+)?)%/);
+    if (match) {
+      sendProgress(match[1]);
+    }
   });
 
-  ytdlp.stderr.on("data", (data) => {
-    console.error(`stderr: ${data}`); // Útil para ver errores en los logs de Render
+  ytdlp.stderr.on("data", data => {
+    console.error(`Dato de error o aviso: ${data}`);
   });
 
   ytdlp.on("close", code => {
-    sendProgress(100);
     if (code === 0 && fs.existsSync(outputPath)) {
+      sendProgress(100);
       res.json({ file: fileName });
     } else {
-      res.status(500).json({ error: "Falló la descarga o conversión" });
+      res.status(500).json({ error: "Error en el proceso de yt-dlp" });
     }
   });
 });
 
-// ================= SERVIR ARCHIVO =================
+// ================= SERVIR EL ARCHIVO PARA DESCARGA =================
 app.get("/file/:name", (req, res) => {
   const filePath = path.join(DOWNLOADS_DIR, req.params.name);
-  if (!fs.existsSync(filePath)) return res.sendStatus(404);
   
-  // Forzar descarga con el nombre correcto
-  res.download(filePath, (err) => {
+  if (fs.existsSync(filePath)) {
+    res.download(filePath, (err) => {
       if (!err) {
-          // Opcional: Borrar archivo después de descargar para ahorrar espacio en servidor
-          // fs.unlinkSync(filePath); 
+        // Borrar el archivo del servidor después de enviarlo para no llenar el disco
+        setTimeout(() => {
+          if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        }, 10000); 
       }
-  });
+    });
+  } else {
+    res.status(404).send("Archivo no encontrado");
+  }
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ Backend activo en puerto ${PORT}`);
+  console.log(`✅ Servidor corriendo en puerto ${PORT}`);
 });
